@@ -3,7 +3,7 @@ class QualityScorer {
     // Define question type configurations
     this.questionTypeWeights = {
       productDescription: { completeness: 0.4, specificity: 0.3, relevance: 0.2, clarity: 0.1 },
-      problemStatement: { completeness: 0.4, specificity: 0.3, relevance: 0.2, clarity: 0.1 },
+      problemStatement: { completeness: 0.35, specificity: 0.35, relevance: 0.2, clarity: 0.1 },
       businessObjectives: { completeness: 0.35, specificity: 0.35, relevance: 0.2, clarity: 0.1 },
       targetMarket: { completeness: 0.4, specificity: 0.3, relevance: 0.2, clarity: 0.1 },
       userStories: { relevance: 0.4, specificity: 0.3, completeness: 0.2, clarity: 0.1 },
@@ -31,7 +31,8 @@ class QualityScorer {
         /\b(?:probably|maybe|might|perhaps|possibly|kind\s+of|sort\s+of|stuff|things|people|users|some|many|various|several)\b/gi,
         /\b(?:good|bad|nice|great|awesome|terrible|amazing|wonderful)\b/gi,
         /\b(?:a\s+lot|lots\s+of|bunch\s+of|tons\s+of)\b/gi,
-        /\b(?:etc|and\s+so\s+on|and\s+stuff)\b/gi
+        /\b(?:etc|and\s+so\s+on|and\s+stuff)\b/gi,
+        /\b(?:does\s+stuff|want\s+things|for\s+people)\b/gi
       ],
       structured: [
         /^\s*[-*•]\s+/gm, // Bullet points
@@ -109,48 +110,48 @@ class QualityScorer {
       return 0;
     }
 
-    let score = 0;
+    let score = 25; // Higher base score
     const responseLength = response.trim().length;
 
     // Base score based on length
     if (responseLength >= 200) {
-      score += 40;
+      score += 50;
     } else if (responseLength >= 100) {
-      score += 30;
+      score += 40;
     } else if (responseLength >= 50) {
-      score += 20;
+      score += 30;
     } else if (responseLength >= 20) {
-      score += 10;
+      score += 15;
     }
 
     // Word count bonus
     const wordCount = response.split(/\s+/).length;
     if (wordCount >= 50) {
-      score += 20;
+      score += 25;
     } else if (wordCount >= 25) {
-      score += 15;
+      score += 20;
     } else if (wordCount >= 10) {
-      score += 10;
+      score += 15;
     }
 
     // Sentence count bonus
     const sentences = response.split(/[.!?]+/).filter(s => s.trim().length > 0);
     if (sentences.length >= 5) {
-      score += 20;
-    } else if (sentences.length >= 3) {
       score += 15;
-    } else if (sentences.length >= 2) {
+    } else if (sentences.length >= 3) {
       score += 10;
+    } else if (sentences.length >= 2) {
+      score += 5;
     }
 
     // Conceptual coverage bonus
     const concepts = this.extractConcepts(response);
     if (concepts.length >= 5) {
-      score += 20;
-    } else if (concepts.length >= 3) {
-      score += 15;
-    } else if (concepts.length >= 2) {
       score += 10;
+    } else if (concepts.length >= 3) {
+      score += 8;
+    } else if (concepts.length >= 2) {
+      score += 5;
     }
 
     return Math.min(100, score);
@@ -161,7 +162,7 @@ class QualityScorer {
       return 0;
     }
 
-    let score = 30; // Base score
+    let score = 40; // Higher base score
 
     // Count specific patterns
     let specificCount = 0;
@@ -172,8 +173,8 @@ class QualityScorer {
       }
     });
 
-    // Add points for specific elements
-    score += Math.min(specificCount * 5, 40);
+    // Add points for specific elements (increased multiplier)
+    score += Math.min(specificCount * 8, 50);
 
     // Count vague patterns and subtract points
     let vagueCount = 0;
@@ -184,7 +185,7 @@ class QualityScorer {
       }
     });
 
-    score -= vagueCount * 3;
+    score -= vagueCount * 6;
 
     // Bonus for detailed patterns
     let detailedCount = 0;
@@ -195,12 +196,12 @@ class QualityScorer {
       }
     });
 
-    score += Math.min(detailedCount * 3, 20);
+    score += Math.min(detailedCount * 4, 25);
 
     // Bonus for proper nouns and technical terms
     const properNouns = response.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g);
     if (properNouns) {
-      score += Math.min(properNouns.length * 2, 10);
+      score += Math.min(properNouns.length * 3, 15);
     }
 
     return Math.max(0, Math.min(100, score));
@@ -270,7 +271,7 @@ class QualityScorer {
       return 0;
     }
 
-    let score = 40; // Base score
+    let score = 55; // Higher base score
 
     // Check for structured writing
     let structuredCount = 0;
@@ -281,7 +282,7 @@ class QualityScorer {
       }
     });
 
-    score += Math.min(structuredCount * 3, 25);
+    score += Math.min(structuredCount * 4, 30);
 
     // Check for clarity indicators
     let clarityCount = 0;
@@ -292,26 +293,28 @@ class QualityScorer {
       }
     });
 
-    score += Math.min(clarityCount * 2, 20);
+    score += Math.min(clarityCount * 3, 25);
 
     // Sentence structure analysis
     const sentences = response.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const avgSentenceLength = sentences.reduce((sum, s) => sum + s.split(/\s+/).length, 0) / sentences.length;
+    if (sentences.length > 0) {
+      const avgSentenceLength = sentences.reduce((sum, s) => sum + s.split(/\s+/).length, 0) / sentences.length;
 
-    // Optimal sentence length is 15-25 words
-    if (avgSentenceLength >= 15 && avgSentenceLength <= 25) {
-      score += 10;
-    } else if (avgSentenceLength >= 10 && avgSentenceLength <= 30) {
-      score += 5;
+      // Optimal sentence length is 15-25 words
+      if (avgSentenceLength >= 15 && avgSentenceLength <= 25) {
+        score += 15;
+      } else if (avgSentenceLength >= 10 && avgSentenceLength <= 30) {
+        score += 10;
+      }
     }
 
     // Paragraph structure bonus
     const paragraphs = response.split(/\n\s*\n/).filter(p => p.trim().length > 0);
     if (paragraphs.length > 1) {
-      score += 5;
+      score += 10;
     }
 
-    // Penalties for poor grammar
+    // Penalties for poor grammar (reduced)
     let grammarIssues = 0;
     this.patterns.poorGrammar.forEach(pattern => {
       const matches = response.match(pattern);
@@ -320,11 +323,11 @@ class QualityScorer {
       }
     });
 
-    score -= grammarIssues * 2;
+    score -= grammarIssues * 3;
 
     // Penalty for run-on sentences (> 40 words)
     const longSentences = sentences.filter(s => s.split(/\s+/).length > 40);
-    score -= longSentences.length * 5;
+    score -= longSentences.length * 3;
 
     return Math.max(0, Math.min(100, score));
   }

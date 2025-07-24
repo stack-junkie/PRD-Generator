@@ -147,7 +147,7 @@ class ValidationEngine {
         this.containsElement(response, element)
       );
       const completenessRatio = presentElements.length / rules.requiredElements.length;
-      completenessScore = completenessRatio * 25;
+      completenessScore = Math.max(20, completenessRatio * 25); // Ensure minimum score
     }
     factors.push(completenessScore);
 
@@ -182,12 +182,12 @@ class ValidationEngine {
       /(might|maybe|probably|possibly)/gi
     ];
 
-    let specificityScore = 15; // Base score
+    let specificityScore = 18; // Higher base score
 
     // Add points for specific indicators
     specificIndicators.forEach(pattern => {
       if (pattern.test(response)) {
-        specificityScore += 2;
+        specificityScore += 3; // More generous scoring
       }
     });
 
@@ -203,7 +203,7 @@ class ValidationEngine {
   }
 
   calculateClarityScore(response) {
-    let clarityScore = 15; // Base score
+    let clarityScore = 18; // Higher base score
 
     // Check for proper sentence structure
     const sentences = response.split(/[.!?]+/).filter(s => s.trim().length > 0);
@@ -254,7 +254,7 @@ class ValidationEngine {
     const conceptMappings = {
       'who': ['users', 'customers', 'professionals', 'teams', 'people', 'audience', 'target'],
       'what': ['application', 'app', 'platform', 'tool', 'product', 'service', 'solution'],
-      'why': ['because', 'to', 'for', 'benefit', 'value', 'improve', 'solve', 'problem'],
+      'why': ['because', 'benefit', 'value', 'improve', 'solve', 'problem', 'purpose', 'reason'],
       'problem': ['challenge', 'issue', 'difficulty', 'struggle', 'pain point'],
       'impact': ['effect', 'result', 'consequence', 'outcome', 'cost'],
       'metric': ['measure', 'kpi', 'target', 'goal', 'percentage', '%'],

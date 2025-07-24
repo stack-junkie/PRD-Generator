@@ -9,8 +9,22 @@ describe('ConversationManager', () => {
 
   beforeEach(() => {
     mockValidationEngine = {
-      validateSection: jest.fn(),
-      validateField: jest.fn()
+      validateSection: jest.fn().mockReturnValue({
+        overall: true,
+        details: {},
+        missingRequired: [],
+        suggestions: []
+      }),
+      validateField: jest.fn(),
+      rules: {
+        introduction: {
+          productDescription: {
+            minLength: 50,
+            requiredElements: ['what', 'who', 'why'],
+            qualityThreshold: 75
+          }
+        }
+      }
     };
     
     conversationManager = new ConversationManager(mockValidationEngine);

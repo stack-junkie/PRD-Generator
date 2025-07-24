@@ -1,9 +1,8 @@
-import { Metadata } from 'next';
+'use client';
+
 import { Inter } from 'next/font/google';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { ThemeProvider } from 'next-themes';
 import { SessionProvider } from '../contexts/SessionContext';
-import { DefaultSeo } from 'next-seo';
 import './globals.css';
 
 // Font configuration
@@ -13,46 +12,8 @@ const inter = Inter({
   variable: '--font-inter',
 });
 
-// SEO configuration
-const SEO_CONFIG = {
-  titleTemplate: '%s | PRD-Maker',
-  defaultTitle: 'PRD-Maker - Professional PRD Generator',
-  description: 'Create professional product requirement documents with AI assistance',
-  canonical: 'https://prd-maker.example.com',
-  openGraph: {
-    type: 'website',
-    locale: 'en_US',
-    url: 'https://prd-maker.example.com',
-    siteName: 'PRD-Maker',
-    title: 'PRD-Maker - Professional PRD Generator',
-    description: 'Create professional product requirement documents with AI assistance',
-    images: [
-      {
-        url: '/og-image.jpg',
-        width: 1200,
-        height: 630,
-        alt: 'PRD-Maker',
-      },
-    ],
-  },
-  twitter: {
-    handle: '@prdmaker',
-    site: '@prdmaker',
-    cardType: 'summary_large_image',
-  },
-};
 
-// Metadata for SEO
-export const metadata: Metadata = {
-  title: 'PRD-Maker - Professional PRD Generator',
-  description: 'Create professional product requirement documents with AI assistance',
-  keywords: 'PRD, product requirements, documentation, AI, product management',
-  authors: [{ name: 'PRD-Maker Team' }],
-  viewport: 'width=device-width, initial-scale=1',
-  icons: {
-    icon: '/favicon.ico',
-  },
-};
+// Since this is now a client component, we'll handle metadata differently
 
 // Create a client
 const queryClient = new QueryClient({
@@ -72,22 +33,37 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={inter.variable} suppressHydrationWarning>
-      <head>
-        <DefaultSeo {...SEO_CONFIG} />
-      </head>
-      <body className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          <QueryClientProvider client={queryClient}>
-            <SessionProvider>
-              {/* Error boundary would go here */}
-              <div className="flex flex-col min-h-screen">
-                {/* Header could go here */}
-                <main className="flex-1">{children}</main>
-                {/* Footer could go here */}
-              </div>
-            </SessionProvider>
-          </QueryClientProvider>
-        </ThemeProvider>
+      <body className="min-h-screen bg-gradient-to-br from-gray-50 to-white text-gray-900 antialiased">
+        <QueryClientProvider client={queryClient}>
+          <SessionProvider>
+            {/* Error boundary would go here */}
+            <div className="flex flex-col min-h-screen">
+              <header className="bg-white/80 backdrop-blur-md border-b border-gray-200 sticky top-0 z-50">
+                <div className="container mx-auto px-4 py-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-8 h-8 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
+                        <span className="text-white font-bold text-sm">P</span>
+                      </div>
+                      <h1 className="text-xl font-bold text-gray-900 m-0">PRD-Maker</h1>
+                    </div>
+                    <nav className="hidden md:flex items-center space-x-6">
+                      <a href="/" className="text-gray-600 hover:text-gray-900 transition-colors">Home</a>
+                      <a href="/library" className="text-gray-600 hover:text-gray-900 transition-colors">Library</a>
+                      <a href="/templates" className="text-gray-600 hover:text-gray-900 transition-colors">Templates</a>
+                    </nav>
+                  </div>
+                </div>
+              </header>
+              <main className="flex-1">{children}</main>
+              <footer className="bg-gray-50 border-t border-gray-200 py-8">
+                <div className="container mx-auto px-4 text-center text-gray-600">
+                  <p>© 2024 PRD-Maker. Built with AI assistance.</p>
+                </div>
+              </footer>
+            </div>
+          </SessionProvider>
+        </QueryClientProvider>
       </body>
     </html>
   );

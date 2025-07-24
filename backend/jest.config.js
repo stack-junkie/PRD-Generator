@@ -10,8 +10,7 @@ module.exports = {
   testMatch: [
     '**/tests/**/*.test.js'
   ],
-  setupFilesAfterEnv: ['./tests/setup.js'],
-  setupFiles: ['<rootDir>/tests/jest.setup.js'],
+  setupFilesAfterEnv: ['<rootDir>/tests/jest.setup.js'],
   testTimeout: 10000,
   coverageThreshold: {
     global: {
@@ -21,7 +20,7 @@ module.exports = {
       statements: 80
     }
   },
-  moduleNameMapping: {
+  moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
     '^@tests/(.*)$': '<rootDir>/tests/$1'
   },
