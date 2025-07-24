@@ -289,3 +289,10 @@ docs/build/
 !docker-compose.yml
 !README.md
 !LICENSE
+
+CLAUDE.md
+prd-generator-requirements.md
+Stash/
+.claude/
+.serena/
+serena/

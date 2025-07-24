@@ -51,6 +51,12 @@ const UserSession = sequelize.define('UserSession', {
     type: DataTypes.STRING,
     allowNull: false,
     field: 'project_name'
+  },
+  status: {
+    type: DataTypes.ENUM('active', 'completed', 'archived'),
+    defaultValue: 'active',
+    field: 'status',
+    allowNull: false
   }
 }, {
   tableName: 'user_sessions',
@@ -58,7 +64,8 @@ const UserSession = sequelize.define('UserSession', {
   indexes: [
     { fields: ['user_id'] },
     { fields: ['created_at'] },
-    { fields: ['last_active'] }
+    { fields: ['last_active'] },
+    { fields: ['status'] }
   ],
   hooks: {
     beforeUpdate: (session) => {
@@ -104,6 +111,11 @@ const Section = sequelize.define('Section', {
       userConsent: false
     },
     field: 'validation_state'
+  },
+  version: {
+    type: DataTypes.INTEGER,
+    defaultValue: 1,
+    field: 'version'
   }
 }, {
   tableName: 'sections',
@@ -112,7 +124,14 @@ const Section = sequelize.define('Section', {
     { fields: ['session_id'] },
     { fields: ['name'] },
     { fields: ['completion_status'] }
-  ]
+  ],
+  hooks: {
+    beforeUpdate: (section) => {
+      if (section.changed('sectionContent')) {
+        section.version += 1;
+      }
+    }
+  }
 });
 
 // Question Model - maps to Question interface
@@ -223,6 +242,57 @@ const Response = sequelize.define('Response', {
   }
 });
 
+// ConversationMessage Model - tracks the full conversation history
+const ConversationMessage = sequelize.define('ConversationMessage', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  sessionId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: UserSession,
+      key: 'sessionId'
+    },
+    field: 'session_id'
+  },
+  role: {
+    type: DataTypes.ENUM('user', 'assistant', 'system'),
+    allowNull: false
+  },
+  content: {
+    type: DataTypes.TEXT,
+    allowNull: false
+  },
+  metadata: {
+    type: DataTypes.JSONB,
+    defaultValue: {},
+    // Stores: section, tokens used, processing time, etc.
+  },
+  createdAt: {
+    type: DataTypes.DATE,
+    defaultValue: DataTypes.NOW,
+    field: 'created_at'
+  }
+}, {
+  tableName: 'conversation_messages',
+  timestamps: false, // We only need createdAt
+  indexes: [
+    { fields: ['session_id', 'created_at'] }, // For conversation ordering
+    { fields: ['created_at'] } // For cleanup jobs
+  ],
+  hooks: {
+    beforeCreate: (message) => {
+      // Sanitize content
+      if (message.content) {
+        message.content = message.content.trim();
+      }
+    }
+  }
+});
+
 // PRDDocument Model - maps to PRDDocument interface
 const PRDDocument = sequelize.define('PRDDocument', {
   id: {
@@ -284,36 +354,44 @@ const PRDDocument = sequelize.define('PRDDocument', {
 });
 
 // Define associations
-UserSession.hasMany(Section, { 
+UserSession.hasMany(Section, {
   foreignKey: 'sessionId',
   as: 'completedSections'
 });
-Section.belongsTo(UserSession, { 
-  foreignKey: 'sessionId' 
+Section.belongsTo(UserSession, {
+  foreignKey: 'sessionId'
 });
 
-Section.hasMany(Question, { 
+Section.hasMany(Question, {
   foreignKey: 'sectionId',
   as: 'questions'
 });
-Question.belongsTo(Section, { 
-  foreignKey: 'sectionId' 
+Question.belongsTo(Section, {
+  foreignKey: 'sectionId'
 });
 
-Question.hasMany(Response, { 
+Question.hasMany(Response, {
   foreignKey: 'questionId',
   as: 'responses'
 });
-Response.belongsTo(Question, { 
-  foreignKey: 'questionId' 
+Response.belongsTo(Question, {
+  foreignKey: 'questionId'
 });
 
-UserSession.hasOne(PRDDocument, { 
+UserSession.hasOne(PRDDocument, {
   foreignKey: 'sessionId',
   as: 'draftPRD'
 });
-PRDDocument.belongsTo(UserSession, { 
-  foreignKey: 'sessionId' 
+PRDDocument.belongsTo(UserSession, {
+  foreignKey: 'sessionId'
+});
+
+UserSession.hasMany(ConversationMessage, {
+  foreignKey: 'sessionId',
+  as: 'messages'
+});
+ConversationMessage.belongsTo(UserSession, {
+  foreignKey: 'sessionId'
 });
 
 // Export models and sequelize instance
@@ -323,5 +401,6 @@ module.exports = {
   Section,
   Question,
   Response,
+  ConversationMessage,
   PRDDocument
 };

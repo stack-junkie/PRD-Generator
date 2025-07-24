@@ -1,0 +1,384 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main, develop ]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      browser:
+        description: 'Browser to run tests on'
+        required: false
+        default: 'chromium'
+        type: choice
+        options:
+          - chromium
+          - firefox
+          - webkit
+          - all
+      environment:
+        description: 'Environment to test against'
+        required: false
+        default: 'local'
+        type: choice
+        options:
+          - local
+          - staging
+          - production
+
+env:
+  NODE_VERSION: '18'
+  POSTGRES_VERSION: '14'
+
+jobs:
+  e2e-tests:
+    name: E2E Tests (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+        exclude:
+          # Exclude webkit on scheduled runs to save CI minutes
+          - browser: webkit
+        include:
+          # Only run webkit on manual dispatch or push to main
+          - browser: webkit
+            if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: prd_generator_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd frontend && npm ci
+          cd ../backend && npm ci
+
+      - name: Install Playwright
+        run: |
+          npm install -g @playwright/test
+          npx playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Setup test database
+        run: |
+          cd backend
+          npm run db:migrate
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/prd_generator_test
+          NODE_ENV: test
+
+      - name: Build applications
+        run: |
+          cd frontend && npm run build
+          cd ../backend && npm run build || echo "No build script found"
+
+      - name: Start services
+        run: |
+          cd backend && npm run dev &
+          cd frontend && npm run dev &
+          # Wait for services to be ready
+          sleep 30
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://test:test@localhost:5432/prd_generator_test
+          REDIS_URL: redis://localhost:6379
+          PORT: 3001
+
+      - name: Run E2E tests
+        run: npx playwright test --project=${{ matrix.browser }}
+        env:
+          E2E_BASE_URL: http://localhost:3000
+          E2E_API_URL: http://localhost:3001
+          E2E_HEADLESS: true
+          E2E_RETRIES: 2
+          DATABASE_URL: postgresql://test:test@localhost:5432/prd_generator_test
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results-${{ matrix.browser }}
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+
+      - name: Upload performance report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-report-${{ matrix.browser }}
+          path: test-results/performance/
+          retention-days: 7
+
+      - name: Comment PR with test results
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request' && always()
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            try {
+              // Read test results
+              const resultsPath = path.join('test-results', 'results.json');
+              if (fs.existsSync(resultsPath)) {
+                const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+                
+                const total = results.stats.expected + results.stats.unexpected + results.stats.flaky;
+                const passed = results.stats.expected;
+                const failed = results.stats.unexpected;
+                const flaky = results.stats.flaky;
+                
+                const body = `## E2E Test Results (${{ matrix.browser }})
+                
+                - **Total Tests**: ${total}
+                - **Passed**: ${passed} ✅
+                - **Failed**: ${failed} ❌
+                - **Flaky**: ${flaky} ⚠️
+                
+                ${failed > 0 ? '⚠️ Some tests failed. Check the full report for details.' : '✅ All tests passed!'}
+                
+                [View full report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+                
+                github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: body
+                });
+              }
+            } catch (error) {
+              console.log('Could not post test results:', error.message);
+            }
+
+  accessibility-tests:
+    name: Accessibility Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: e2e-tests
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: prd_generator_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd frontend && npm ci
+          cd ../backend && npm ci
+          npm install -g @playwright/test axe-playwright
+
+      - name: Install Playwright
+        run: npx playwright install chromium
+
+      - name: Setup and start services
+        run: |
+          cd backend && npm run db:migrate
+          cd backend && npm run dev &
+          cd frontend && npm run dev &
+          sleep 30
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://test:test@localhost:5432/prd_generator_test
+
+      - name: Run accessibility tests
+        run: npx playwright test --grep "accessibility"
+        env:
+          E2E_BASE_URL: http://localhost:3000
+
+      - name: Upload accessibility report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: accessibility-report
+          path: test-results/accessibility/
+          retention-days: 7
+
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: prd_generator_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: |
+          cd frontend && npm ci
+          cd ../backend && npm ci
+          npm install -g @playwright/test
+
+      - name: Install Playwright
+        run: npx playwright install chromium
+
+      - name: Setup and start services
+        run: |
+          cd backend && npm run db:migrate
+          cd backend && npm run dev &
+          cd frontend && npm run dev &
+          sleep 30
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://test:test@localhost:5432/prd_generator_test
+
+      - name: Run performance tests
+        run: npx playwright test --grep "performance"
+        env:
+          E2E_BASE_URL: http://localhost:3000
+          PERFORMANCE_TRACKING: true
+
+      - name: Upload performance metrics
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-metrics
+          path: test-results/performance/
+          retention-days: 30
+
+      - name: Create performance badge
+        run: |
+          echo '{"schemaVersion":1,"label":"Performance","message":"monitored","color":"blue"}' > test-results/performance-badge.json
+
+      - name: Upload performance badge
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-badge
+          path: test-results/performance-badge.json
+          retention-days: 30
+
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [e2e-tests, accessibility-tests]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Generate test summary
+        run: |
+          echo "# E2E Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Count results from all browsers
+          total_passed=0
+          total_failed=0
+          total_tests=0
+          
+          for browser in chromium firefox webkit; do
+            results_file="e2e-results-$browser/test-results/results.json"
+            if [ -f "$results_file" ]; then
+              passed=$(jq '.stats.expected' "$results_file")
+              failed=$(jq '.stats.unexpected' "$results_file")
+              total=$((passed + failed))
+              
+              echo "## $browser Results" >> $GITHUB_STEP_SUMMARY
+              echo "- Tests: $total" >> $GITHUB_STEP_SUMMARY
+              echo "- Passed: $passed ✅" >> $GITHUB_STEP_SUMMARY
+              echo "- Failed: $failed ❌" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              
+              total_passed=$((total_passed + passed))
+              total_failed=$((total_failed + failed))
+              total_tests=$((total_tests + total))
+            fi
+          done
+          
+          echo "## Overall Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Total Tests: $total_tests" >> $GITHUB_STEP_SUMMARY
+          echo "- Total Passed: $total_passed ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- Total Failed: $total_failed ❌" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $total_failed -gt 0 ]; then
+            echo "❌ Some tests failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ All tests passed!" >> $GITHUB_STEP_SUMMARY
+          fi

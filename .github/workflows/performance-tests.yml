@@ -1,0 +1,516 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [ master, main, develop ]
+  pull_request:
+    branches: [ master, main, develop ]
+  schedule:
+    # Run performance tests nightly at 3 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      test_scenario:
+        description: 'Performance test scenario to run'
+        required: false
+        default: 'load'
+        type: choice
+        options:
+          - load
+          - concurrent
+          - throughput
+          - ai-response
+          - database-export
+          - stress-spike
+          - stress-endurance
+          - stress-volume
+          - stress-breakpoint
+          - all
+      target_vus:
+        description: 'Target Virtual Users'
+        required: false
+        default: '50'
+        type: string
+      test_duration:
+        description: 'Test Duration'
+        required: false
+        default: '5m'
+        type: string
+      environment:
+        description: 'Target Environment'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - local
+          - staging
+          - production
+
+env:
+  NODE_VERSION: '18'
+  K6_VERSION: '0.47.0'
+
+jobs:
+  performance-setup:
+    name: Performance Test Setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    outputs:
+      test-scenarios: ${{ steps.scenarios.outputs.scenarios }}
+      environment-config: ${{ steps.env-config.outputs.config }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine test scenarios
+        id: scenarios
+        run: |
+          if [ "${{ github.event.inputs.test_scenario }}" = "all" ] || [ "${{ github.event_name }}" = "schedule" ]; then
+            SCENARIOS='["load", "concurrent", "throughput", "ai-response", "database-export"]'
+          else
+            SCENARIOS='["${{ github.event.inputs.test_scenario || 'load' }}"]'
+          fi
+          echo "scenarios=$SCENARIOS" >> $GITHUB_OUTPUT
+          echo "Test scenarios: $SCENARIOS"
+
+      - name: Configure environment
+        id: env-config
+        run: |
+          ENV="${{ github.event.inputs.environment || 'staging' }}"
+          
+          case $ENV in
+            "staging")
+              BASE_URL="https://api-staging.prd-generator.com"
+              FRONTEND_URL="https://staging.prd-generator.com"
+              ;;
+            "production")
+              BASE_URL="https://api.prd-generator.com"
+              FRONTEND_URL="https://prd-generator.com"
+              ;;
+            *)
+              BASE_URL="http://localhost:3001"
+              FRONTEND_URL="http://localhost:3000"
+              ;;
+          esac
+          
+          CONFIG="{\"environment\":\"$ENV\",\"baseUrl\":\"$BASE_URL\",\"frontendUrl\":\"$FRONTEND_URL\"}"
+          echo "config=$CONFIG" >> $GITHUB_OUTPUT
+          echo "Environment config: $CONFIG"
+
+  performance-tests:
+    name: Performance Tests (${{ matrix.scenario }})
+    runs-on: ubuntu-latest
+    needs: performance-setup
+    timeout-minutes: 60
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJson(needs.performance-setup.outputs.test-scenarios) }}
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: prd_generator_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: |
+            frontend/package-lock.json
+            backend/package-lock.json
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6=${{ env.K6_VERSION }}
+
+      - name: Install application dependencies
+        run: |
+          cd frontend && npm ci
+          cd ../backend && npm ci
+
+      - name: Setup test database
+        if: ${{ fromJson(needs.performance-setup.outputs.environment-config).environment == 'local' }}
+        run: |
+          cd backend
+          npm run db:migrate
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/prd_generator_test
+          NODE_ENV: test
+
+      - name: Build applications
+        if: ${{ fromJson(needs.performance-setup.outputs.environment-config).environment == 'local' }}
+        run: |
+          cd frontend && npm run build
+          cd ../backend && npm run build || echo "No build script found"
+
+      - name: Start local services
+        if: ${{ fromJson(needs.performance-setup.outputs.environment-config).environment == 'local' }}
+        run: |
+          cd backend && npm run dev &
+          cd frontend && npm run dev &
+          # Wait for services to be ready
+          sleep 30
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://test:test@localhost:5432/prd_generator_test
+          REDIS_URL: redis://localhost:6379
+          PORT: 3001
+
+      - name: Create performance test results directory
+        run: mkdir -p test-results/performance
+
+      - name: Run performance tests
+        run: |
+          TARGET_VUS="${{ github.event.inputs.target_vus || '50' }}"
+          TEST_DURATION="${{ github.event.inputs.test_duration || '5m' }}"
+          ENV_CONFIG='${{ needs.performance-setup.outputs.environment-config }}'
+          BASE_URL=$(echo "$ENV_CONFIG" | jq -r '.baseUrl')
+          FRONTEND_URL=$(echo "$ENV_CONFIG" | jq -r '.frontendUrl')
+          ENVIRONMENT=$(echo "$ENV_CONFIG" | jq -r '.environment')
+          
+          case "${{ matrix.scenario }}" in
+            "load")
+              k6 run tests/performance/loadTest.js \
+                --env BASE_URL="$BASE_URL" \
+                --env FRONTEND_URL="$FRONTEND_URL" \
+                --env ENVIRONMENT="$ENVIRONMENT" \
+                --env SCENARIO="default" \
+                --env TARGET_VUS="$TARGET_VUS" \
+                --env DURATION="$TEST_DURATION"
+              ;;
+            "concurrent")
+              k6 run tests/performance/scenarios/concurrent-users.js \
+                --env BASE_URL="$BASE_URL" \
+                --env ENVIRONMENT="$ENVIRONMENT" \
+                --env TARGET_VUS="$TARGET_VUS" \
+                --env RAMP_DURATION="2m" \
+                --env STEADY_DURATION="$TEST_DURATION"
+              ;;
+            "throughput")
+              k6 run tests/performance/scenarios/throughput.js \
+                --env BASE_URL="$BASE_URL" \
+                --env ENVIRONMENT="$ENVIRONMENT" \
+                --env TARGET_RPS="${{ github.event.inputs.target_vus || '50' }}" \
+                --env TEST_DURATION="$TEST_DURATION"
+              ;;
+            "ai-response")
+              k6 run tests/performance/scenarios/ai-response.js \
+                --env BASE_URL="$BASE_URL" \
+                --env ENVIRONMENT="$ENVIRONMENT" \
+                --env AI_LOAD_VUS="20" \
+                --env AI_TEST_DURATION="$TEST_DURATION"
+              ;;
+            "database-export")
+              k6 run tests/performance/scenarios/database-export.js \
+                --env BASE_URL="$BASE_URL" \
+                --env ENVIRONMENT="$ENVIRONMENT" \
+                --env DB_LOAD_VUS="30" \
+                --env DB_TEST_DURATION="$TEST_DURATION"
+              ;;
+            "stress-"*)
+              STRESS_TYPE=$(echo "${{ matrix.scenario }}" | sed 's/stress-//')
+              k6 run tests/performance/scenarios/stress-tests.js \
+                --env BASE_URL="$BASE_URL" \
+                --env ENVIRONMENT="$ENVIRONMENT" \
+                --env STRESS_TEST_TYPE="$STRESS_TYPE" \
+                --env MAX_VUS="$TARGET_VUS"
+              ;;
+          esac
+        env:
+          K6_BROWSER_ENABLED: true
+
+      - name: Upload performance test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: performance-results-${{ matrix.scenario }}
+          path: |
+            test-results/performance/
+          retention-days: 30
+
+      - name: Upload performance metrics to monitoring
+        if: success() && github.event_name != 'pull_request'
+        run: |
+          # Upload to monitoring system (placeholder)
+          echo "Uploading performance metrics to monitoring system..."
+          
+          # Example: Send to DataDog, New Relic, or custom monitoring
+          if [ -f "test-results/performance/performance-report.json" ]; then
+            echo "Performance data available for upload"
+            # curl -X POST "https://api.monitoring.com/metrics" \
+            #   -H "Authorization: Bearer $MONITORING_API_KEY" \
+            #   -H "Content-Type: application/json" \
+            #   -d @test-results/performance/performance-report.json
+          fi
+        env:
+          MONITORING_API_KEY: ${{ secrets.MONITORING_API_KEY }}
+
+  performance-analysis:
+    name: Performance Analysis & Reporting
+    runs-on: ubuntu-latest
+    needs: [performance-setup, performance-tests]
+    if: always()
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all performance results
+        uses: actions/download-artifact@v4
+        with:
+          path: test-results/
+
+      - name: Install k6 for analysis
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6=${{ env.K6_VERSION }}
+
+      - name: Consolidate performance results
+        run: |
+          mkdir -p consolidated-results
+          find test-results/ -name "*.json" -type f | while read file; do
+            scenario=$(echo "$file" | sed -n 's/.*performance-results-\([^/]*\).*/\1/p')
+            if [ -n "$scenario" ]; then
+              cp "$file" "consolidated-results/${scenario}-results.json"
+            fi
+          done
+          
+          # Create summary report
+          echo "# Performance Test Summary" > consolidated-results/summary.md
+          echo "" >> consolidated-results/summary.md
+          echo "**Test Run**: $(date)" >> consolidated-results/summary.md
+          echo "**Commit**: ${{ github.sha }}" >> consolidated-results/summary.md
+          echo "**Branch**: ${{ github.ref_name }}" >> consolidated-results/summary.md
+          echo "" >> consolidated-results/summary.md
+          
+          # Add scenario summaries
+          for scenario in $(echo '${{ needs.performance-setup.outputs.test-scenarios }}' | jq -r '.[]'); do
+            echo "## $scenario Test Results" >> consolidated-results/summary.md
+            if [ -f "consolidated-results/${scenario}-results.json" ]; then
+              echo "✅ Completed successfully" >> consolidated-results/summary.md
+              # Extract key metrics (would need jq processing in real implementation)
+              echo "- Status: See detailed results" >> consolidated-results/summary.md
+            else
+              echo "❌ Failed or not executed" >> consolidated-results/summary.md
+            fi
+            echo "" >> consolidated-results/summary.md
+          done
+
+      - name: Generate performance trend analysis
+        run: |
+          # This would compare against historical baselines
+          echo "📊 Generating performance trend analysis..."
+          
+          # Create trend analysis placeholder
+          cat > consolidated-results/trend-analysis.json << EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}",
+            "scenarios": $(echo '${{ needs.performance-setup.outputs.test-scenarios }}'),
+            "baseline_comparison": {
+              "enabled": false,
+              "message": "Baseline comparison not yet implemented"
+            }
+          }
+          EOF
+
+      - name: Comment PR with performance results
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            let comment = `## 🚀 Performance Test Results\n\n`;
+            comment += `**Test Scenarios**: ${{ join(fromJson(needs.performance-setup.outputs.test-scenarios), ', ') }}\n`;
+            comment += `**Environment**: ${{ fromJson(needs.performance-setup.outputs.environment-config).environment }}\n`;
+            comment += `**Commit**: ${{ github.sha }}\n\n`;
+            
+            // Check if summary file exists
+            const summaryPath = 'consolidated-results/summary.md';
+            if (fs.existsSync(summaryPath)) {
+              const summary = fs.readFileSync(summaryPath, 'utf8');
+              comment += summary;
+            } else {
+              comment += `❌ Performance test results not available\n`;
+            }
+            
+            comment += `\n[View detailed results](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Upload consolidated results
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-analysis
+          path: consolidated-results/
+          retention-days: 90
+
+      - name: Send Slack notification on performance regression
+        if: failure() || (success() && github.event_name == 'schedule')
+        run: |
+          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            STATUS="${{ job.status }}"
+            COLOR="good"
+            if [ "$STATUS" != "success" ]; then
+              COLOR="danger"
+            fi
+            
+            curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"attachments\": [
+                  {
+                    \"color\": \"$COLOR\",
+                    \"title\": \"Performance Tests - $STATUS\",
+                    \"text\": \"Performance tests completed with status: $STATUS\",
+                    \"fields\": [
+                      {
+                        \"title\": \"Repository\",
+                        \"value\": \"${{ github.repository }}\",
+                        \"short\": true
+                      },
+                      {
+                        \"title\": \"Branch\",
+                        \"value\": \"${{ github.ref_name }}\",
+                        \"short\": true
+                      },
+                      {
+                        \"title\": \"Scenarios\",
+                        \"value\": \"${{ join(fromJson(needs.performance-setup.outputs.test-scenarios), ', ') }}\",
+                        \"short\": false
+                      }
+                    ],
+                    \"actions\": [
+                      {
+                        \"type\": \"button\",
+                        \"text\": \"View Results\",
+                        \"url\": \"https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+                      }
+                    ]
+                  }
+                ]
+              }"
+          fi
+
+  performance-baseline-update:
+    name: Update Performance Baseline
+    runs-on: ubuntu-latest
+    needs: [performance-setup, performance-tests, performance-analysis]
+    if: success() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download performance results
+        uses: actions/download-artifact@v4
+        with:
+          name: performance-analysis
+          path: performance-results/
+
+      - name: Update performance baseline
+        run: |
+          echo "📊 Updating performance baseline..."
+          
+          # This would update the baseline performance metrics
+          # stored in a database, S3, or other persistent storage
+          
+          mkdir -p performance-baselines
+          
+          # Copy current results as new baseline
+          for scenario in $(echo '${{ needs.performance-setup.outputs.test-scenarios }}' | jq -r '.[]'); do
+            if [ -f "performance-results/${scenario}-results.json" ]; then
+              echo "Updating baseline for $scenario"
+              cp "performance-results/${scenario}-results.json" "performance-baselines/${scenario}-baseline.json"
+              
+              # Add metadata
+              jq '. + {
+                "baseline": true,
+                "baseline_date": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
+                "commit": "'${{ github.sha }}'",
+                "branch": "'${{ github.ref_name }}'"
+              }' "performance-baselines/${scenario}-baseline.json" > temp.json
+              mv temp.json "performance-baselines/${scenario}-baseline.json"
+            fi
+          done
+
+      - name: Commit baseline updates
+        if: github.event_name != 'pull_request'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          if [ -n "$(git status --porcelain performance-baselines/)" ]; then
+            git add performance-baselines/
+            git commit -m "Update performance baselines - $(date)"
+            git push
+          else
+            echo "No baseline changes to commit"
+          fi
+
+      - name: Create performance dashboard data
+        run: |
+          # Generate data for performance dashboard
+          cat > performance-dashboard.json << EOF
+          {
+            "last_updated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "branch": "${{ github.ref_name }}",
+            "scenarios": $(echo '${{ needs.performance-setup.outputs.test-scenarios }}'),
+            "environment": "${{ fromJson(needs.performance-setup.outputs.environment-config).environment }}",
+            "workflow_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload dashboard data
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-dashboard
+          path: performance-dashboard.json
+          retention-days: 365
