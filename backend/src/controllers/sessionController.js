@@ -6,15 +6,19 @@
 // Import dependencies
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger'); // Assuming a winston-based logger
+const SessionManager = require('../services/SessionManager');
 
 class SessionController {
-  constructor(models = null) {
+  constructor(models = null, config = {}) {
     // Dependency injection for models
     this.models = models || require('../models');
     this.UserSession = this.models.UserSession;
     this.Section = this.models.Section;
     this.PRDDocument = this.models.PRDDocument;
     this.ConversationMessage = this.models.ConversationMessage;
+    
+    // Initialize the SessionManager service
+    this.sessionManager = new SessionManager(models, config);
     
     // Default section structure
     this.sectionStructure = [
@@ -37,59 +41,15 @@ class SessionController {
     logger.info('Creating new session', { projectName: sessionData.projectName });
     
     try {
-      // Create the user session
-      const session = await this.UserSession.create({
-        sessionId: uuidv4(),
-        projectName: sessionData.projectName,
-        description: sessionData.description || '',
-        currentSection: 0,
-        createdAt: new Date(),
-        lastActive: new Date(),
-        status: 'active',
-        userId: sessionData.userId || null
-      });
+      // Use SessionManager to initialize a new session with all related data
+      // This handles DB transactions, section initialization, and Redis caching
+      const sessionResult = await this.sessionManager.initializeSession(sessionData);
       
-      // Initialize section records for this session
-      await this.initializeSections(session.sessionId);
+      // Return the created session data
+      // We'll exclude the internal state from the API response
+      const { state, ...sessionResponse } = sessionResult;
       
-      // Create initial PRD document
-      await this.PRDDocument.create({
-        sessionId: session.sessionId,
-        sections: {},
-        metadata: {
-          createdAt: new Date(),
-          lastModified: new Date(),
-          version: '1.0.0',
-          template: sessionData.template || 'basic'
-        }
-      });
-      
-      // Add system message to conversation
-      await this.ConversationMessage.create({
-        sessionId: session.sessionId,
-        role: 'system',
-        content: `Session created for project: ${sessionData.projectName}`,
-        metadata: {
-          event: 'session_created',
-          template: sessionData.template || 'basic'
-        },
-        createdAt: new Date()
-      });
-      
-      // Return the created session with additional metadata
-      return {
-        sessionId: session.sessionId,
-        projectName: session.projectName,
-        template: sessionData.template || 'basic',
-        description: session.description,
-        createdAt: session.createdAt,
-        currentSection: session.currentSection,
-        progress: {
-          currentSection: 0,
-          totalSections: this.sectionStructure.length,
-          percentComplete: 0
-        }
-      };
+      return sessionResponse;
     } catch (error) {
       logger.error('Error creating session', {
         error: error.message,
@@ -141,64 +101,15 @@ class SessionController {
     logger.info('Retrieving session', { sessionId });
     
     try {
-      // Get the session record
-      const session = await this.UserSession.findOne({
-        where: { sessionId },
-        include: [
-          {
-            model: this.Section,
-            as: 'completedSections'
-          }
-        ]
-      });
+      // Use SessionManager to get session data (cache-first approach)
+      const session = await this.sessionManager.getSession(sessionId);
       
       if (!session) {
         logger.warn('Session not found', { sessionId });
         return null;
       }
       
-      // Get sections data
-      const sections = await this.Section.findAll({
-        where: { sessionId },
-        order: [['id', 'ASC']]
-      });
-      
-      // Convert to response format
-      const completedSections = sections
-        .filter(section => section.completionStatus)
-        .map(section => section.name);
-      
-      // Get responses data - could be expanded in a real implementation
-      const responses = {};
-      sections.forEach(section => {
-        if (section.sectionContent) {
-          responses[section.name] = { content: section.sectionContent };
-        }
-      });
-      
-      // Calculate progress
-      const progress = {
-        completedSections: completedSections.length,
-        totalSections: this.sectionStructure.length,
-        percentComplete: Math.round((completedSections.length / this.sectionStructure.length) * 100)
-      };
-      
-      return {
-        sessionId: session.sessionId,
-        projectName: session.projectName,
-        description: session.description,
-        currentSection: session.currentSection,
-        completedSections,
-        responses,
-        progress,
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt || session.lastActive,
-        lastActive: session.lastActive,
-        status: session.status,
-        metadata: {
-          template: session.template || 'basic'
-        }
-      };
+      return session;
     } catch (error) {
       logger.error('Error retrieving session', {
         error: error.message,
@@ -219,41 +130,15 @@ class SessionController {
     logger.info('Updating session', { sessionId, updateFields: Object.keys(updateData) });
     
     try {
-      const session = await this.UserSession.findOne({
-        where: { sessionId }
-      });
+      // Use SessionManager to update session (handles DB & cache updates)
+      const updatedSession = await this.sessionManager.updateSession(sessionId, updateData);
       
-      if (!session) {
+      if (!updatedSession) {
         logger.warn('Session not found for update', { sessionId });
         return null;
       }
       
-      // Update allowed fields
-      const allowedFields = ['projectName', 'description', 'lastActive', 'currentSection'];
-      const updateFields = {};
-      
-      allowedFields.forEach(field => {
-        if (updateData[field] !== undefined) {
-          updateFields[field] = updateData[field];
-        }
-      });
-      
-      // Always update lastActive
-      updateFields.lastActive = updateData.lastActive || new Date();
-      
-      // Update the session
-      await session.update(updateFields);
-      
-      // Return updated session data
-      return {
-        sessionId: session.sessionId,
-        projectName: session.projectName,
-        description: session.description,
-        updatedAt: new Date(),
-        lastActive: session.lastActive,
-        currentSection: session.currentSection,
-        status: session.status
-      };
+      return updatedSession;
     } catch (error) {
       logger.error('Error updating session', {
         error: error.message,
@@ -271,16 +156,10 @@ class SessionController {
    */
   async updateLastAccessed(sessionId) {
     try {
-      const session = await this.UserSession.findOne({
-        where: { sessionId }
-      });
-      
-      if (!session) {
-        return false;
-      }
-      
-      await session.update({ lastActive: new Date() });
-      return true;
+      // Use SessionManager to update last accessed timestamp
+      // This updates both DB and cache
+      const success = await this.sessionManager.updateLastAccessed(sessionId);
+      return success;
     } catch (error) {
       logger.error('Error updating last accessed', {
         error: error.message,
@@ -490,38 +369,30 @@ class SessionController {
    */
   async getSessionStatus(sessionId) {
     try {
-      const session = await this.UserSession.findOne({
-        where: { sessionId },
-        attributes: ['sessionId', 'currentSection', 'lastActive', 'status']
-      });
+      // First validate session existence
+      const validation = await this.sessionManager.validateSession(sessionId);
+      
+      if (!validation) {
+        return null;
+      }
+      
+      // Get full session data
+      const session = await this.sessionManager.getSession(sessionId);
       
       if (!session) {
         return null;
       }
       
-      // Calculate basic progress info
-      const sections = await this.Section.findAll({
-        where: { sessionId },
-        attributes: ['name', 'completionStatus']
-      });
-      
-      const completedSections = sections.filter(s => s.completionStatus).length;
-      const progress = {
-        completedSections,
-        totalSections: this.sectionStructure.length,
-        percentComplete: Math.round((completedSections / this.sectionStructure.length) * 100)
-      };
-      
       // Check if session is still active (within 30 days)
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      const isActive = session.lastActive > thirtyDaysAgo;
+      const isActive = new Date(session.lastActive) > thirtyDaysAgo;
       
       return {
         sessionId: session.sessionId,
         status: session.status,
         currentSection: session.currentSection,
-        progress,
+        progress: session.progress,
         lastActive: session.lastActive,
         isActive
       };
@@ -583,6 +454,13 @@ class SessionController {
       });
       throw error;
     }
+  }
+  
+  /**
+   * Close Redis connection on server shutdown
+   */
+  async closeConnections() {
+    await this.sessionManager.closeConnection();
   }
 }
 

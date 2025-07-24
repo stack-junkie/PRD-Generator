@@ -1,0 +1,281 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: 250, 250, 250;
+  --background-end-rgb: 255, 255, 255;
+  --primary: 37, 99, 235;
+  --primary-foreground: 255, 255, 255;
+  --secondary: 226, 232, 240;
+  --secondary-foreground: 30, 41, 59;
+  --muted: 241, 245, 249;
+  --muted-foreground: 100, 116, 139;
+  --accent: 249, 250, 251;
+  --accent-foreground: 15, 23, 42;
+  --destructive: 239, 68, 68;
+  --destructive-foreground: 255, 255, 255;
+  --border: 226, 232, 240;
+  --input: 226, 232, 240;
+  --ring: 37, 99, 235;
+  --radius: 0.5rem;
+}
+
+.dark {
+  --foreground-rgb: 255, 255, 255;
+  --background-start-rgb: 15, 23, 42;
+  --background-end-rgb: 30, 41, 59;
+  --primary: 59, 130, 246;
+  --primary-foreground: 255, 255, 255;
+  --secondary: 30, 41, 59;
+  --secondary-foreground: 241, 245, 249;
+  --muted: 51, 65, 85;
+  --muted-foreground: 148, 163, 184;
+  --accent: 30, 41, 59;
+  --accent-foreground: 248, 250, 252;
+  --destructive: 248, 113, 113;
+  --destructive-foreground: 255, 255, 255;
+  --border: 51, 65, 85;
+  --input: 51, 65, 85;
+  --ring: 59, 130, 246;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+      to bottom,
+      transparent,
+      rgb(var(--background-end-rgb))
+    )
+    rgb(var(--background-start-rgb));
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+@layer base {
+  h1 {
+    @apply text-3xl font-bold tracking-tight sm:text-4xl mb-6;
+  }
+  h2 {
+    @apply text-2xl font-bold tracking-tight sm:text-3xl mb-4;
+  }
+  h3 {
+    @apply text-xl font-bold tracking-tight sm:text-2xl mb-3;
+  }
+  h4 {
+    @apply text-lg font-bold tracking-tight mb-2;
+  }
+  p {
+    @apply leading-7 mb-4;
+  }
+  ul, ol {
+    @apply mb-4 ml-6;
+  }
+  li {
+    @apply mb-1;
+  }
+  
+  /* Form elements styling */
+  input, textarea, select {
+    @apply px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-300 focus:border-primary-300;
+  }
+
+  button {
+    @apply inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-md shadow transition-colors;
+  }
+  
+  .btn-secondary {
+    @apply bg-gray-200 hover:bg-gray-300 text-gray-800 py-2 px-4 rounded-md shadow transition-colors;
+  }
+  
+  .btn-outline {
+    @apply border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800 py-2 px-4 rounded-md shadow transition-colors;
+  }
+  
+  .card {
+    @apply bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 overflow-hidden;
+  }
+  
+  .form-group {
+    @apply mb-4;
+  }
+  
+  .form-label {
+    @apply block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1;
+  }
+  
+  .form-input {
+    @apply w-full;
+  }
+  
+  .alert {
+    @apply p-4 mb-4 rounded border;
+  }
+  
+  .alert-info {
+    @apply bg-blue-50 dark:bg-blue-900/30 border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300;
+  }
+  
+  .alert-success {
+    @apply bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800 text-green-800 dark:text-green-300;
+  }
+  
+  .alert-warning {
+    @apply bg-yellow-50 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-800 text-yellow-800 dark:text-yellow-300;
+  }
+  
+  .alert-error {
+    @apply bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800 text-red-800 dark:text-red-300;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(156, 163, 175, 0.5);
+  border-radius: 20px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(156, 163, 175, 0.8);
+}
+
+/* Loading animations */
+.loading-dots {
+  display: inline-flex;
+}
+
+.loading-dots span {
+  width: 8px;
+  height: 8px;
+  margin: 0 3px;
+  border-radius: 50%;
+  background-color: currentColor;
+  opacity: 0.6;
+  animation: loading-dots 1.4s ease-in-out infinite;
+}
+
+.loading-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.loading-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes loading-dots {
+  0%, 100% {
+    transform: translateY(0);
+    opacity: 0.6;
+  }
+  50% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+
+/* Markdown content styling */
+.markdown {
+  @apply text-gray-900 dark:text-gray-100 leading-normal;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  @apply font-bold text-gray-900 dark:text-white mt-6 mb-4;
+}
+
+.markdown p {
+  @apply mb-4;
+}
+
+.markdown ul,
+.markdown ol {
+  @apply mb-4 ml-6;
+}
+
+.markdown ul {
+  @apply list-disc;
+}
+
+.markdown ol {
+  @apply list-decimal;
+}
+
+.markdown li {
+  @apply mb-1;
+}
+
+.markdown blockquote {
+  @apply pl-4 border-l-4 border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 italic my-4;
+}
+
+.markdown pre {
+  @apply bg-gray-100 dark:bg-gray-800 p-4 rounded my-4 overflow-x-auto;
+}
+
+.markdown code {
+  @apply bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded text-gray-800 dark:text-gray-200 text-sm;
+}
+
+.markdown pre code {
+  @apply bg-transparent p-0 text-gray-800 dark:text-gray-200;
+}
+
+.markdown a {
+  @apply text-blue-600 dark:text-blue-400 hover:underline;
+}
+
+.markdown table {
+  @apply w-full border-collapse my-4;
+}
+
+.markdown th,
+.markdown td {
+  @apply border border-gray-300 dark:border-gray-700 px-4 py-2;
+}
+
+.markdown th {
+  @apply bg-gray-100 dark:bg-gray-800;
+}
+
+.markdown img {
+  @apply max-w-full h-auto my-4 rounded;
+}
+
+.markdown hr {
+  @apply my-6 border-t border-gray-300 dark:border-gray-700;
+}
