@@ -7,14 +7,17 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useStore } from '../store/useStore';
+import { io } from 'socket.io-client';
 
 // Constants
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001/api';
-const WS_BASE_URL = process.env.REACT_APP_WS_URL || 'ws://localhost:3001';
+const WS_BASE_URL = process.env.REACT_APP_WS_URL || 'http://localhost:3001';
 const MAX_RETRIES = 3;
 const RETRY_DELAY_BASE = 1000; // 1 second
 const REQUEST_TIMEOUT = 30000; // 30 seconds
 const TYPING_INDICATOR_DELAY = 500; // 500ms
+const SOCKET_RECONNECT_DELAY = 3000; // 3 seconds
+const SOCKET_MAX_RECONNECT_ATTEMPTS = 5;
 
 // Message types
 const MESSAGE_TYPES = {
@@ -32,6 +35,14 @@ const REQUEST_STATES = {
   SUCCESS: 'success',
   ERROR: 'error',
   CANCELLED: 'cancelled'
+};
+
+// Connection states
+const CONNECTION_STATES = {
+  CONNECTED: 'connected',
+  DISCONNECTED: 'disconnected',
+  CONNECTING: 'connecting',
+  ERROR: 'error'
 };
 
 // Error types
@@ -77,14 +88,17 @@ export const useAI = (sessionId, section, options = {}) => {
     isStreaming: false,
     error: null,
     typingIndicator: false,
-    progress: 0
+    progress: 0,
+    connectionState: CONNECTION_STATES.DISCONNECTED
   });
 
   // Refs for cleanup and cancellation
   const abortControllerRef = useRef(null);
-  const websocketRef = useRef(null);
+  const socketRef = useRef(null);
   const retryTimeoutRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
   const messageQueueRef = useRef([]);
 
   // Get current conversation
@@ -204,38 +218,245 @@ export const useAI = (sessionId, section, options = {}) => {
   }, [section, sessionId]);
 
   /**
-   * WebSocket streaming implementation
+   * Socket.IO connection initialization
    */
-  const initializeWebSocket = useCallback(() => {
-    if (!enableStreaming || websocketRef.current?.readyState === WebSocket.OPEN) {
-      return Promise.resolve(websocketRef.current);
+  const initializeSocket = useCallback(() => {
+    if (!enableStreaming) {
+      return Promise.resolve(null);
     }
+
+    // If socket already exists and is connected, return it
+    if (socketRef.current?.connected) {
+      return Promise.resolve(socketRef.current);
+    }
+
+    setState(prev => ({ ...prev, connectionState: CONNECTION_STATES.CONNECTING }));
 
     return new Promise((resolve, reject) => {
       try {
-        const ws = new WebSocket(`${WS_BASE_URL}/ai/stream`);
-        websocketRef.current = ws;
+        // Create Socket.IO instance
+        const socket = io(WS_BASE_URL, {
+          reconnection: true,
+          reconnectionAttempts: SOCKET_MAX_RECONNECT_ATTEMPTS,
+          reconnectionDelay: SOCKET_RECONNECT_DELAY,
+          timeout: timeout,
+          autoConnect: true,
+          transports: ['websocket', 'polling']
+        });
 
-        ws.onopen = () => {
-          console.log('WebSocket connected');
-          resolve(ws);
-        };
+        socketRef.current = socket;
 
-        ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          reject(new Error('WebSocket connection failed'));
-        };
+        // Connection event handlers
+        socket.on('connect', () => {
+          console.log('Socket.IO connected');
+          setState(prev => ({ ...prev, connectionState: CONNECTION_STATES.CONNECTED }));
+          reconnectAttemptsRef.current = 0;
 
-        ws.onclose = () => {
-          console.log('WebSocket disconnected');
-          websocketRef.current = null;
-        };
+          // Join session room
+          socket.emit('join-session', { sessionId, userId: 'user' }, (response) => {
+            if (response.success) {
+              console.log(`Joined session room: ${sessionId}`);
+            } else {
+              console.error(`Failed to join session room: ${response.error}`);
+            }
+          });
+
+          resolve(socket);
+        });
+
+        socket.on('connect_error', (error) => {
+          console.error('Socket.IO connection error:', error);
+          setState(prev => ({ 
+            ...prev, 
+            connectionState: CONNECTION_STATES.ERROR,
+            error: {
+              message: `WebSocket connection error: ${error.message}`,
+              type: ERROR_TYPES.WEBSOCKET,
+              timestamp: new Date().toISOString()
+            }
+          }));
+
+          // Only reject on initial connection
+          if (reconnectAttemptsRef.current === 0) {
+            reject(error);
+          }
+        });
+
+        socket.on('disconnect', (reason) => {
+          console.log(`Socket.IO disconnected: ${reason}`);
+          setState(prev => ({ ...prev, connectionState: CONNECTION_STATES.DISCONNECTED }));
+
+          // Don't attempt to reconnect if explicitly closed
+          if (reason === 'io client disconnect') {
+            return;
+          }
+
+          // Custom reconnection logic
+          if (reconnectAttemptsRef.current < SOCKET_MAX_RECONNECT_ATTEMPTS) {
+            const delay = calculateRetryDelay(reconnectAttemptsRef.current);
+            console.log(`Attempting to reconnect in ${delay}ms (attempt ${reconnectAttemptsRef.current + 1}/${SOCKET_MAX_RECONNECT_ATTEMPTS})`);
+            
+            reconnectTimeoutRef.current = setTimeout(() => {
+              reconnectAttemptsRef.current++;
+              socket.connect();
+            }, delay);
+          }
+        });
+
+        // Event handlers
+        socket.on('message-chunk', (data) => {
+          handleMessageChunk(data);
+        });
+
+        socket.on('validation-update', (data) => {
+          handleValidationUpdate(data);
+        });
+
+        socket.on('section-complete', (data) => {
+          handleSectionComplete(data);
+        });
+
+        socket.on('user-joined', (data) => {
+          console.log(`User joined: ${data.userId} at ${data.timestamp}`);
+          // Could update UI to show other users in the session
+        });
+
+        socket.on('user-left', (data) => {
+          console.log(`User left: ${data.userId} at ${data.timestamp}`);
+          // Could update UI to show other users in the session
+        });
+
+        socket.on('error', (data) => {
+          console.error('Socket.IO error:', data);
+          setState(prev => ({ 
+            ...prev, 
+            error: {
+              message: data.message || 'WebSocket error',
+              type: ERROR_TYPES.WEBSOCKET,
+              timestamp: new Date().toISOString()
+            }
+          }));
+        });
 
       } catch (error) {
+        console.error('Failed to initialize Socket.IO:', error);
+        setState(prev => ({ 
+          ...prev, 
+          connectionState: CONNECTION_STATES.ERROR,
+          error: {
+            message: `WebSocket initialization error: ${error.message}`,
+            type: ERROR_TYPES.WEBSOCKET,
+            timestamp: new Date().toISOString()
+          }
+        }));
         reject(error);
       }
     });
-  }, [enableStreaming]);
+  }, [enableStreaming, sessionId, timeout, calculateRetryDelay]);
+
+  /**
+   * Handle message chunks from WebSocket
+   */
+  const handleMessageChunk = useCallback((data) => {
+    const { content, messageId, metadata = {}, isLast = false } = data;
+
+    setState(prev => ({ ...prev, isStreaming: true }));
+    setTypingIndicator(false);
+
+    // Find existing message or create a new one
+    const existingMessageIndex = messages.findIndex(msg => 
+      msg.id === messageId || 
+      (msg.type === MESSAGE_TYPES.AI && msg.isStreaming)
+    );
+
+    if (existingMessageIndex >= 0) {
+      // Update existing streaming message
+      const message = messages[existingMessageIndex];
+      const updatedContent = message.content + (content || '');
+      
+      updateMessage(sessionId, message.id, {
+        content: updatedContent,
+        isStreaming: !isLast,
+        metadata: { ...message.metadata, ...metadata }
+      });
+    } else {
+      // Create a new message for the first chunk
+      const newMessage = {
+        id: messageId || `ai_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        type: MESSAGE_TYPES.AI,
+        content: content || '',
+        timestamp: new Date().toISOString(),
+        section,
+        sessionId,
+        isStreaming: !isLast,
+        metadata
+      };
+      
+      addMessage(sessionId, newMessage);
+    }
+
+    // If this is the last chunk, update state
+    if (isLast) {
+      setState(prev => ({ ...prev, isStreaming: false }));
+    }
+  }, [messages, sessionId, section, updateMessage, addMessage, setTypingIndicator]);
+
+  /**
+   * Handle validation updates from WebSocket
+   */
+  const handleValidationUpdate = useCallback((data) => {
+    const { section: updatedSection, valid, errors, messages: validationMessages } = data;
+    
+    // Update conversation context with validation data
+    setConversation(sessionId, {
+      ...conversation,
+      context: {
+        ...conversation.context,
+        validation: {
+          ...(conversation.context.validation || {}),
+          [updatedSection]: { valid, errors, messages: validationMessages }
+        }
+      },
+      updatedAt: new Date().toISOString()
+    });
+    
+    // Could add a system message about validation
+    if (!valid && validationMessages?.length) {
+      const systemMessage = createOptimisticMessage(
+        `Validation for ${updatedSection}: ${validationMessages.join('. ')}`,
+        MESSAGE_TYPES.SYSTEM
+      );
+      addMessage(sessionId, systemMessage);
+    }
+  }, [sessionId, conversation, setConversation, createOptimisticMessage, addMessage]);
+
+  /**
+   * Handle section completion events from WebSocket
+   */
+  const handleSectionComplete = useCallback((data) => {
+    const { section: completedSection, nextSection } = data;
+    
+    // Update conversation context
+    setConversation(sessionId, {
+      ...conversation,
+      context: {
+        ...conversation.context,
+        completedSections: [
+          ...(conversation.context.completedSections || []),
+          completedSection
+        ],
+        currentSection: nextSection
+      },
+      updatedAt: new Date().toISOString()
+    });
+    
+    // Add system message about section completion
+    const systemMessage = createOptimisticMessage(
+      `Section "${completedSection}" completed! ${nextSection ? `Moving to "${nextSection}"` : 'All sections completed!'}`,
+      MESSAGE_TYPES.SYSTEM
+    );
+    addMessage(sessionId, systemMessage);
+  }, [sessionId, conversation, setConversation, createOptimisticMessage, addMessage]);
 
   /**
    * Send message via REST API
@@ -293,105 +514,80 @@ export const useAI = (sessionId, section, options = {}) => {
   ]);
 
   /**
-   * Send message via WebSocket streaming
+   * Send message via Socket.IO streaming
    */
-  const sendStreamMessage = useCallback(async (message, context) => {
+  const sendSocketMessage = useCallback(async (message, context, messageId) => {
     try {
-      const ws = await initializeWebSocket();
+      const socket = await initializeSocket();
+      if (!socket) {
+        throw new Error('WebSocket initialization failed');
+      }
       
       return new Promise((resolve, reject) => {
+        let streamingComplete = false;
         let accumulatedResponse = '';
-        let messageId = null;
-
-        const messageHandler = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            
-            switch (data.type) {
-              case 'start':
-                messageId = data.messageId;
-                setState(prev => ({ ...prev, isStreaming: true }));
-                setTypingIndicator(false);
-                break;
-                
-              case 'chunk':
-                accumulatedResponse += data.content;
-                if (messageId) {
-                  updateMessage(sessionId, messageId, {
-                    content: accumulatedResponse,
-                    isStreaming: true
-                  });
-                }
-                break;
-                
-              case 'end':
-                setState(prev => ({ ...prev, isStreaming: false }));
-                if (messageId) {
-                  updateMessage(sessionId, messageId, {
-                    content: accumulatedResponse,
-                    isStreaming: false,
-                    isOptimistic: false
-                  });
-                }
-                ws.removeEventListener('message', messageHandler);
-                resolve({
-                  content: accumulatedResponse,
-                  messageId,
-                  metadata: data.metadata
-                });
-                break;
-                
-              case 'error':
-                setState(prev => ({ ...prev, isStreaming: false }));
-                ws.removeEventListener('message', messageHandler);
-                reject(new Error(data.message));
-                break;
-            }
-          } catch (error) {
-            console.error('Error parsing WebSocket message:', error);
+        const responseMetadata = {};
+        
+        // Set up timeout
+        const timeoutId = setTimeout(() => {
+          if (!streamingComplete) {
+            reject(new Error('Streaming response timeout'));
+          }
+        }, timeout);
+        
+        // Set up message handler
+        const onMessageChunk = (data) => {
+          if (data.sessionId !== sessionId) return;
+          
+          accumulatedResponse += data.content || '';
+          Object.assign(responseMetadata, data.metadata || {});
+          
+          if (data.isLast) {
+            streamingComplete = true;
+            cleanup();
+            resolve({
+              content: accumulatedResponse,
+              messageId: data.messageId || messageId,
+              metadata: responseMetadata
+            });
           }
         };
-
-        ws.addEventListener('message', messageHandler);
+        
+        // Set up error handler
+        const onError = (data) => {
+          if (data.sessionId !== sessionId) return;
+          cleanup();
+          reject(new Error(data.message || 'Streaming error'));
+        };
+        
+        // Clean up event listeners
+        const cleanup = () => {
+          clearTimeout(timeoutId);
+          socket.off('message-chunk', onMessageChunk);
+          socket.off('error', onError);
+        };
+        
+        // Add event listeners
+        socket.on('message-chunk', onMessageChunk);
+        socket.on('error', onError);
         
         // Send the message
-        ws.send(JSON.stringify({
-          type: 'message',
+        socket.emit('message', {
           message,
           sessionId,
           section,
           context: context || conversation.context,
           settings: aiSettings
-        }));
-
-        // Timeout handling
-        const timeoutId = setTimeout(() => {
-          ws.removeEventListener('message', messageHandler);
-          reject(new Error('Streaming timeout'));
-        }, timeout);
-
-        // Clear timeout on completion
-        const originalResolve = resolve;
-        const originalReject = reject;
-        
-        resolve = (...args) => {
-          clearTimeout(timeoutId);
-          originalResolve(...args);
-        };
-        
-        reject = (...args) => {
-          clearTimeout(timeoutId);
-          originalReject(...args);
-        };
+        });
       });
       
     } catch (error) {
-      console.warn('WebSocket streaming failed, falling back to REST:', error);
+      console.warn('Socket.IO streaming failed, falling back to REST:', error);
       throw error;
     }
   }, [
-    initializeWebSocket, sessionId, section, conversation.context, 
-    aiSettings, timeout, updateMessage, setTypingIndicator
+    initializeSocket, sessionId, section, conversation.context,
+    aiSettings, timeout
   ]);
 
   /**
@@ -457,7 +653,7 @@ export const useAI = (sessionId, section, options = {}) => {
       // Try streaming first, fall back to REST
       if (enableStreaming) {
         try {
-          result = await sendStreamMessage(message, context);
+          result = await sendSocketMessage(message, context, optimisticMessage?.id);
         } catch (streamError) {
           console.warn('Streaming failed, falling back to REST API:', streamError);
           result = await sendRestMessage(message, context);
@@ -468,7 +664,7 @@ export const useAI = (sessionId, section, options = {}) => {
 
       // Update or create AI response message
       const aiMessage = {
-        id: optimisticMessage?.id || `ai_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        id: optimisticMessage?.id || result.messageId || `ai_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         type: MESSAGE_TYPES.AI,
         content: result.content || result.message,
         timestamp: new Date().toISOString(),
@@ -546,7 +742,7 @@ export const useAI = (sessionId, section, options = {}) => {
     }
   }, [
     enableCaching, isOnline, getCacheKey, addMessage, createOptimisticMessage,
-    section, sessionId, enableStreaming, sendStreamMessage, sendRestMessage,
+    section, sessionId, enableStreaming, sendSocketMessage, sendRestMessage,
     updateMessage, setConversation, conversation, setTypingIndicator, classifyError
   ]);
 
@@ -598,6 +794,32 @@ export const useAI = (sessionId, section, options = {}) => {
   }, [setTypingIndicator]);
 
   /**
+   * Manually connect to WebSocket
+   */
+  const connect = useCallback(() => {
+    return initializeSocket();
+  }, [initializeSocket]);
+
+  /**
+   * Manually disconnect from WebSocket
+   */
+  const disconnect = useCallback(() => {
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+    
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+    }
+    
+    setState(prev => ({ 
+      ...prev, 
+      connectionState: CONNECTION_STATES.DISCONNECTED 
+    }));
+  }, []);
+
+  /**
    * Clear conversation history
    */
   const clearMessages = useCallback(() => {
@@ -629,10 +851,26 @@ export const useAI = (sessionId, section, options = {}) => {
       aiMessages: aiMessages.length,
       errors: errors.length,
       cacheSize: cacheRef.current.size,
-      isConnected: websocketRef.current?.readyState === WebSocket.OPEN,
+      isConnected: socketRef.current?.connected,
+      connectionState: state.connectionState,
       lastActivity: messages[messages.length - 1]?.timestamp
     };
-  }, [messages]);
+  }, [messages, state.connectionState]);
+
+  // Auto-connect to WebSocket on mount
+  useEffect(() => {
+    if (enableStreaming) {
+      initializeSocket().catch(error => {
+        console.warn('Initial WebSocket connection failed:', error);
+      });
+    }
+    
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, [enableStreaming, initializeSocket]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -649,11 +887,24 @@ export const useAI = (sessionId, section, options = {}) => {
         clearTimeout(typingTimeoutRef.current);
       }
       
-      if (websocketRef.current) {
-        websocketRef.current.close();
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      
+      if (socketRef.current) {
+        socketRef.current.disconnect();
       }
     };
   }, []);
+
+  // Reconnect WebSocket on network status change
+  useEffect(() => {
+    if (isOnline && state.connectionState === CONNECTION_STATES.DISCONNECTED && enableStreaming) {
+      initializeSocket().catch(error => {
+        console.warn('WebSocket reconnection failed:', error);
+      });
+    }
+  }, [isOnline, state.connectionState, enableStreaming, initializeSocket]);
 
   // Auto-save conversation on changes
   useEffect(() => {
@@ -678,6 +929,10 @@ export const useAI = (sessionId, section, options = {}) => {
     cancel,
     clearMessages,
 
+    // WebSocket control
+    connect,
+    disconnect,
+
     // State
     isLoading: state.isLoading,
     isStreaming: state.isStreaming,
@@ -686,6 +941,8 @@ export const useAI = (sessionId, section, options = {}) => {
     conversation,
     typingIndicator: state.typingIndicator,
     progress: state.progress,
+    connectionState: state.connectionState,
+    isConnected: state.connectionState === CONNECTION_STATES.CONNECTED,
 
     // Utilities
     getStats,
@@ -706,7 +963,8 @@ export const useAI = (sessionId, section, options = {}) => {
 export const AI_TYPES = {
   MESSAGE_TYPES,
   REQUEST_STATES,
-  ERROR_TYPES
+  ERROR_TYPES,
+  CONNECTION_STATES
 };
 
 // Default export

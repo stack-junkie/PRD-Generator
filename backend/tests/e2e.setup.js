@@ -1,20 +1,23 @@
-// Test setup for backend
+// E2E test setup file
 const { setupTestDatabase, clearDatabase, closeDatabase } = require('./helpers/testDatabase');
 const { createMockServices, resetAllMocks } = require('./helpers/mockServices');
 
 // Global test services
 global.testServices = null;
 
-// Setup before all tests
+// Setup before all e2e tests
 beforeAll(async () => {
   // Setup test database
   await setupTestDatabase();
   
   // Create mock services
   global.testServices = createMockServices();
-}, 10000);
+  
+  // Set longer timeout for e2e tests
+  jest.setTimeout(30000);
+}, 30000);
 
-// Cleanup after all tests
+// Cleanup after all e2e tests
 afterAll(async () => {
   // Close database connection
   await closeDatabase();
@@ -25,16 +28,13 @@ afterAll(async () => {
   }
 }, 10000);
 
-// Reset between tests
+// Reset between e2e tests
 beforeEach(async () => {
-  // Clear database data between tests
+  // Clear database data
   await clearDatabase();
-  
-  // Clear all mocks
-  jest.clearAllMocks();
   
   // Reset mock services
   if (global.testServices) {
     resetAllMocks();
   }
-});
+}, 10000);

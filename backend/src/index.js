@@ -78,6 +78,7 @@ const redis = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const winston = require('winston');
 const path = require('path');
+const http = require('http');
 
 // Import database models
 const { sequelize } = require('./models');
@@ -91,6 +92,9 @@ const AIService = require('./services/AIService');
 const ValidationEngine = require('./services/ValidationEngine');
 const ConversationManager = require('./services/ConversationManager');
 const QualityScorer = require('./services/QualityScorer');
+
+// Import WebSocket manager
+const SocketManager = require('./websocket/socketManager');
 
 // =============================================================================
 // 3. Logger Configuration
@@ -272,6 +276,7 @@ let aiService;
 let validationEngine;
 let conversationManager;
 let qualityScorer;
+let socketManager;
 
 const initializeServices = async () => {
   try {
@@ -401,8 +406,24 @@ const startServer = async () => {
     process.exit(1);
   }
   
+  // Create HTTP server (needed for Socket.IO)
+  server = http.createServer(app);
+  
+  // Initialize WebSocket server
+  try {
+    socketManager = new SocketManager({
+      httpServer: server,
+      redisClient: redisClient,
+      logger
+    });
+    logger.info('WebSocket server initialized successfully');
+  } catch (error) {
+    logger.error(`Failed to initialize WebSocket server: ${error.message}`);
+    // Continue even if WebSocket fails - it's not critical for the application
+  }
+  
   // Start the server
-  server = app.listen(PORT, () => {
+  server.listen(PORT, () => {
     logger.info(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
     logger.info(`Health check available at http://localhost:${PORT}${API_PREFIX}/health`);
   });
@@ -432,6 +453,13 @@ const gracefulShutdown = async (signal) => {
       logger.info('Closing HTTP server...');
       await new Promise((resolve) => server.close(resolve));
       logger.info('HTTP server closed');
+    }
+    
+    // Close WebSocket connections
+    if (socketManager) {
+      logger.info('Closing WebSocket connections...');
+      socketManager.close();
+      logger.info('WebSocket connections closed');
     }
     
     // Close Redis connection
@@ -476,4 +504,4 @@ process.on('unhandledRejection', (reason, promise) => {
 startServer();
 
 // Export for testing purposes
-module.exports = { app, redisClient, gracefulShutdown };
+module.exports = { app, server, redisClient, socketManager, gracefulShutdown };
